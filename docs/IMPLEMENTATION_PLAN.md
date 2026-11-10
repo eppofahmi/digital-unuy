@@ -4,13 +4,21 @@
 
 ## 1. Architecture Decision
 
-| Decision | Choice | Rationale | Split Trigger |
-|----------|--------|-----------|---------------|
-| Codebase topology | **Monolith** — Nuxt 3 full-stack (Vue SSR + Nitro API) | Phase 1 has one client, one deploy unit, and a shared domain layer (`server/models`, `server/utils`, `shared/`). SSR is required for SEO and public pages. | Go backend per SOP §6.3; SSO/institutional integration; public API/mobile client; independent scaling of uploads/email; >2 engineers on separate cadences (Q6) |
-| Service boundary | `pages/` + `components/` (UI) · `server/api` (HTTP) · `server/models` (data) · `server/utils` (security, validation, upload, email, audit) · `shared/` (types, permissions, SEO) | Domain helpers are already isolated from HTTP handlers; only Nuxt binds them. | When Go replaces Nitro, `server/api` + `server/utils` are the porting surface; `shared/` becomes the contract source. |
-| Rendering | SSR for public and admin routes; client hydration for interactive forms/dialogs | SEO policy and auth-gated admin require server rendering. | — |
+| Decision | Choice | Rationale | Status |
+|----------|--------|-----------|--------|
+| Codebase topology **(target)** | **Split — two repos: `fe/` Nuxt + `be/` Go** | House standard: every project uses Go for the backend and Vue/Nuxt for the frontend. It also moves the API onto the stack SOP §6.3 requires and isolates uploads/email from public SSR. | **Decided 2026-11-07** (D-STACK). Phase 1 code is still the Nuxt monolith below. |
+| Phase 1 as-built | Monolith — Nuxt 3 full-stack (Vue SSR + Nitro API) | Shipped and QA'd as one deploy unit. `server/api`, `server/models`, and `server/utils` already isolate domain code from HTTP, which is what makes the port tractable. | Current state; porting surface for the split |
+| Service boundary **(target)** | `fe/` — pages, components, layouts, composables, BFF routes · `be/` — handler → service → repository → MongoDB · `API_CONTRACTS.md` as the single contract | The FE keeps SSR/SEO and becomes the only public ingress; the BE serves JSON and is not exposed directly (same BFF pattern as `website-builder` and `survey`). | Redirect target layout in §2, migration in §13 |
+| Rendering | SSR for public and admin routes in the FE; BE is JSON-only | SEO policy and auth-gated admin require server rendering; the BE stays stateless HTTP. | Unchanged |
 
-**Decision record:** Ship Phase 1 as a Nuxt monolith. Public SEO, request submission, and admin CMS share one deployment and one MongoDB connection; splitting now would add CORS, token auth, and a duplicated contract layer without a second client. The split is deferred until a real trigger appears.
+**Decision record:** Phase 1 shipped as a Nuxt monolith because it had one client, one deploy unit, and one MongoDB connection. That is no longer the constraint: the house standard is Go BE + Nuxt FE for all projects, so the split is a standing decision rather than a trigger-based option. Phase 1 remains the reference implementation and stays deployable until the migration in §13 lands; this document therefore distinguishes **as-built** (Nitro monolith) from **target** (Go + Nuxt) instead of rewriting history.
+
+**Why the split is not free (must be designed, not assumed):**
+
+- The session cookie (`SameSite=Lax`) and CSRF origin check currently rely on public pages and API sharing one origin. A separate BE needs one of: FE-as-BFF with an internal token (the pattern used by `website-builder`/`survey`), or cross-site cookies with CORS, or bearer tokens.
+- Uploads live on the local filesystem (`NUXT_UPLOAD_DIR`). With a stateless Go service, uploads either stay behind the FE (BFF) or move to object storage (already planned in T21).
+- Rate limiting is in-process today; two services make it two independent limiters unless a shared store (Redis, T22) is introduced.
+- `shared/` (types, permissions, SEO) disappears as a shared module; `API_CONTRACTS.md` plus generated Swagger become the contract, and FE types are derived from it.
 
 ## 2. Repo & Workspace Layout
 
@@ -40,7 +48,33 @@ digital-unuy/
 └── package.json
 ```
 
-**Repo model:** single repository, one deploy artifact (`.output/`), one MongoDB database. No workspace tooling.
+**Repo model (as-built):** single repository, one deploy artifact (`.output/`), one MongoDB database. No workspace tooling.
+
+**Target repo model:** two repositories under the product folder — `fe/` (Nuxt) and `be/` (Go) — matching the house structure used by `website-builder` and `survey`. The monolith stays as the reference until the migration is complete.
+
+```
+03-website-tim/
+├── fe/                          # Nuxt 3 + Vue 3: pages, layouts, components,
+│                                # composables, middleware, SSR, and BFF API routes
+│   ├── pages/                   # public + admin screens (ported from current pages/)
+│   ├── server/api/              # BFF: proxy to be/, session cookie, CSRF/internal token
+│   └── nuxt.config.ts
+└── be/                          # Go + Gin
+    ├── cmd/server/main.go       # entrypoint, dependency wiring
+    ├── internal/
+    │   ├── config/              # env config, fail-fast validation
+    │   ├── delivery/http/       # handler/, middleware/, router.go
+    │   ├── domain/              # models + domain errors
+    │   ├── repository/          # MongoDB data access
+    │   └── service/             # business logic (port of server/utils + models)
+    ├── pkg/                     # response, validator, logger, uploads client
+    ├── migrations/              # MongoDB index/migration scripts
+    ├── docs/                    # generated Swagger (swaggo)
+    ├── Makefile
+    └── go.mod
+```
+
+**Porting surface:** `server/api/**` → `be/internal/delivery/http/handler`; `server/models/**` → `be/internal/domain/models` + `be/internal/repository`; `server/utils/**` → `be/internal/service` + `be/pkg`. The Nuxt `pages/`, `components/`, `layouts/`, and `composables/` move to `fe/` unchanged except for the API base URL and auth transport.
 
 ## 3. Deployment Platform & Topology
 
@@ -82,6 +116,22 @@ digital-unuy/
 | API contract | Target `/api/v1` + `{data,message,error}`; Phase 1 `/api/*` raw | PRD D4 / Q-API. |
 | API docs | None (OpenAPI planned Phase 3) | Endpoints documented in `API_CONTRACTS.md`. |
 | Observability | Console logs; `NotificationLog` and `AuditLog` in DB | Health check, structured logs, uptime monitoring planned Phase 3. |
+
+### 4.1 Target stack (split)
+
+The table above documents Phase 1 as-built. After the split, these are the layers that change; everything else (Nuxt/Vue, Tailwind, MongoDB, Sharp, Markdown pipeline) carries over.
+
+| Decision | Target | Notes |
+|---|---|---|
+| Backend framework | **Go + Gin** | House standard; replaces Nitro handlers |
+| API documentation | **swaggo/swag**, UI at `/swagger`, `make swagger` committed | Mandatory standard; replaces "None (OpenAPI planned Phase 3)" |
+| Activity log | Async audit service (goroutine/queue) with the schema in the house standard | Mandatory; complements the existing `AuditLog` collection |
+| Error handling | Central `httperr` mapping; domain errors `ErrNotFound`/`ErrForbidden`/`ErrConflict`/`ErrValidation` | No stack traces to clients |
+| Data access | Repository pattern over MongoDB (mongo-driver v2) | Mongoose models are ported, not the driver |
+| Backend tests | `go test ./...`, `go vet ./...`, `go test -race ./...` | Fills the Phase 1 unit-test gap |
+| Frontend | Nuxt 3.21 + Vue 3.5 + TypeScript strict | Unchanged; keeps SSR/SEO |
+| Auth transport **(open)** | FE holds the session cookie and calls BE through BFF routes with an internal token; **or** cross-site cookie with CORS | Must be decided before the first endpoint migrates — see §13 |
+| Deployment | Two services; FE public, BE internal-only | Platform (VM vs Cloud Run) is Q2 and does not change the topology requirement |
 
 ## 5. Task Breakdown
 
@@ -313,10 +363,15 @@ T20 (e2e/visual/responsive)
 
 **Assumptions**
 
-- A1: Phase 1 tetap monolit Nuxt; migrasi Go/SSO dicatat sebagai Q6.
+- A1: Phase 1 tetap monolit Nuxt dan tetap menjadi referensi perilaku. Target arsitektur adalah split Go BE + Nuxt FE (D-STACK); rencana migrasinya ada di §13, bukan asumsi.
 - A2: Deployment Phase 1 adalah satu instance Node dengan MongoDB dan upload lokal.
 - A3: Domain publik dan SMTP ditetapkan operator.
 - A4: `/api/v1` + envelope diterapkan pada Phase 2/rewrite; Phase 1 memakai `/api/*` raw.
+- A5: Stack tidak lagi dipilih per proyek. Go + Gin untuk BE dan Nuxt untuk FE berlaku untuk proyek baru maupun pemisahan repo.
+
+**Decisions**
+
+- **D-STACK (2026-11-07, D8 di PRD §16):** Semua proyek memakai Go untuk backend dan Vue/Nuxt untuk frontend. Untuk Digital UNUY ini berarti dua repo (`fe/`, `be/`) dan menutup pertanyaan "apakah backend Go dikerjakan" — yang tersisa hanyalah urutan migrasi dan model auth (§13).
 
 **Open questions**
 
@@ -330,3 +385,44 @@ T20 (e2e/visual/responsive)
 - Q8: Retensi permohonan, audit, dan lampiran.
 - Q9: Audit aksesibilitas formal.
 - Q-API: Migrasi `/api/*` ke `/api/v1` + envelope.
+
+## 13. Migration to Go + Nuxt (target)
+
+**Principle — strangler, not big bang.** The FE keeps serving and owns the public origin; endpoints move to the Go service behind the FE BFF one domain at a time. A monolith route is deleted only after its Go replacement passes parity checks, so the app is deployable at every step.
+
+**Prerequisites (must be settled before the first endpoint moves):**
+
+1. **Auth transport** (§4.1) — BFF with an internal token, or cross-site cookie + CORS. Every endpoint depends on this; porting first and deciding later would double the work.
+2. **Contract freeze per wave** — the endpoints in scope are updated in `API_CONTRACTS.md` to `/api/v1` + envelope before implementation starts.
+3. **Index parity** — MongoDB indexes required by the ported queries are captured in `be/migrations/` and checked against `DATA_CATALOG.md`.
+4. **House scaffolding** — Gin router, swaggo (`make swagger`), centralized `httperr`, async activity log, and config validation exist before domain code.
+
+**Porting order (by contract section, not by file):**
+
+| Wave | Scope | Contract sections | Depends on |
+|---|---|---|---|
+| 0 | Skeleton: health, `auth/me`, settings read, BFF wiring | §3 (partial), §9 (settings read) | Auth transport decision |
+| 1 | Public content: services, ecosystem, publications, pages, team, SEO routes | §1, §8 (public reads), §10 | Wave 0 |
+| 2 | Request submission, tracking, requester follow-up, attachments | §2 | Wave 0; upload handling decision |
+| 3 | Admin reads: dashboard, requests, services, documents, ecosystem, publications | §4–§8 (reads) | Wave 1 |
+| 4 | Admin writes + users, roles, settings, notifications, audit | §4–§9 (writes) | Wave 3; activity log live |
+| 5 | Uploads, images, email | §6, §8 (files), notifications | Object storage (T21) or BFF-proxied uploads |
+
+**Per-wave Definition of Done:**
+
+- Every ported endpoint matches `API_CONTRACTS.md` (status codes, envelope, `404` vs `403` semantics).
+- Swagger annotations present and `make swagger` clean; activity log emitted for every state-changing action.
+- FE calls the endpoint through the BFF only — no direct BE URL in the browser.
+- Contract tests or E2E cover the ported flow; `go vet` and `go test ./...` pass.
+- The corresponding Nuxt route is deleted in the same change, not left as a fallback.
+
+**Cutover & rollback:** keep the monolith deployable until wave 5 is complete. If a ported endpoint regresses, restore the Nuxt route from the previous release tag; the Go route stays deployed but unreferenced. Data stays in one MongoDB database for the whole migration, so no data migration is required — only index additions.
+
+**What does not change:** RBAC semantics (11 permission keys, last-superadmin guard), the MongoDB collections and field names, the FE screens and design tokens, SEO policy, and the audit trail requirements. The split is a transport and process change, not a product change.
+
+**Open questions specific to the migration:**
+
+- **M1:** BFF vs cross-site cookie (blocks wave 0).
+- **M2:** Uploads stay behind the FE BFF, or move to object storage as part of the split (affects wave 2 and 5).
+- **M3:** Rate limiting moves to a shared store (Redis, T22) or stays per service instance.
+- **M4:** Whether `/api/v1` + envelope applies retroactively to endpoints still served by the monolith during the transition (currently A4 says Phase 2/rewrite).

@@ -224,6 +224,8 @@ Biaya bila dibiarkan: waktu petugas habis untuk koordinasi manual, pemohon menun
 | Testing | Playwright-core scripts (`test:e2e`, `test:visual`, `test:responsive`) | ^1.64.1 | Yes |
 | Deployment | Nuxt Nitro Node output, port 3000 | — | Phase 1 |
 
+**Target arsitektur (D-STACK, 7 Nov 2026):** backend Go + Gin dan frontend Vue/Nuxt sebagai dua repo terpisah. Tabel di atas tetap mendokumentasikan Phase 1 as-built (monolit Nitro) dan tidak berubah retroaktif; rincian target, porting surface, dan urutan migrasi ada di `IMPLEMENTATION_PLAN.md` §4.1 dan §13. Akibat yang harus diselesaikan sebelum endpoint pertama pindah: transport auth (BFF + internal token vs cookie lintas-origin), penanganan upload (`NUXT_UPLOAD_DIR` vs object storage), dan rate limit bersama.
+
 ## 8. Core Features (MVP / V1 / V2)
 
 | # | Feature | For Whom / Solves What | Priority | BE | FE | Notes |
@@ -428,6 +430,7 @@ MongoDB collections (Mongoose). Full field-level catalog is in `docs/DATA_CATALO
 - **D5 — Scale:** ≤1.000 staf, ≤5.000 permohonan/tahun.
 - **D6 — Non-goals:** SSO/integrasi data institusional, object storage, pemindaian malware.
 - **D7 — Owner/approver:** Arief Faqihudin.
+- **D8 — Stack (7 Nov 2026):** semua proyek memakai **Go untuk backend dan Vue/Nuxt untuk frontend** (D-STACK). Untuk produk ini artinya dua repo (`fe/`, `be/`) dan migrasi bertahap dari monolit Nitro (plan §13). D8 menutup pertanyaan "apakah backend Go dikerjakan"; yang tersisa adalah model auth dan urutan migrasi.
 
 **Assumptions (correct if wrong)**
 

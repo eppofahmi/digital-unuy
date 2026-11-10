@@ -23,6 +23,17 @@ This runbook covers shipping the Phase 1 Nuxt/Nitro application, MongoDB, and th
 
 One application deployable. Uploads and MongoDB must both persist.
 
+**Target split (D-STACK):** after the migration in `IMPLEMENTATION_PLAN.md` §13, the stack becomes two deployables. This table is the intended inventory, not a committed artifact.
+
+| Service | Type | Exposure | Notes |
+|---|---|---|---|
+| `fe` | Nuxt 3 (SSR + BFF API routes) | Public ingress, TLS at proxy | Owns the session cookie and CSRF/internal-token checks |
+| `be` | Go + Gin (JSON API) | **No public ingress** | Reached only by `fe` (internal network on VM, or authenticated/internal Cloud Run) |
+| `mongodb` | MongoDB 7+ | Internal only | Single database shared by both during and after the split |
+| Upload volume | Private files | Mounted to the upload owner | Either stays with `fe` behind BFF routes, or moves to object storage (plan §13 M2) |
+
+Platform choice (VM + Compose vs Cloud Run) is still Q2 and does not change the exposure rule: only the Nuxt FE is publicly reachable. The `be` service must never accept browser traffic directly, because the session cookie and CSRF origin check live on the FE.
+
 ## 3. Containerization (planned)
 
 | Concern | Implementation |
